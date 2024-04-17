@@ -34,7 +34,6 @@ class FileTransmissionHandler:
         data = self.file.read(DATA_SIZE)
         
         if not data:
-            print('end of file')
             raise EOFError('')
 
         self.cached_data_packets.append(data)

@@ -1,5 +1,6 @@
 import socket
 import struct
+import sys
 
 from utils import calculate_md5, ACTION_STATUS, file_exists, SERVER_IP, SERVER_PORT
 from FileTransmissionHandler import FileTransmissionHandler
@@ -62,6 +63,7 @@ class Server:
     def handle_ack(self, value, client_address):
         if client_address not in self.file_client_dict.keys():
             raise ValueError('File not open yet')
+        
         value = int(value)
         wrong_ack = self.file_client_dict[client_address].ack(value)
         
@@ -74,6 +76,9 @@ class Server:
 
 
     def handle_resend(self, value, client_address):
+        if client_address not in self.file_client_dict.keys():
+            raise ValueError('File not open yet')
+        
         value = int(value)
         print(f'>>> retransmitting ({value})')
 
@@ -105,9 +110,7 @@ class Server:
             try:
                 print(f'\n> request received from {client_address}:\n>> {self.parse_query(message.decode())}')
                 packet_id, data = self.request(message.decode(), client_address)
-
                 res = self.response(ACTION_STATUS["OK"], packet_id, data)
-
                 self.server_socket.sendto(res, client_address)
 
             # Handles File not found
@@ -133,5 +136,14 @@ class Server:
 
 
 if __name__ == "__main__":
-    server = Server(SERVER_IP, SERVER_PORT)
+
+    ip = SERVER_IP
+    if len(sys.argv) > 1:
+        ip = sys.argv[1]
+
+    port = SERVER_PORT
+    if len(sys.argv) > 2:
+        port = sys.argv[2]
+
+    server = Server(ip, int(port))
     server.run()
