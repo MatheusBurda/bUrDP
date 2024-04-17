@@ -7,9 +7,9 @@ The protocol developed for this app is described bellow:
 &emsp; **[action_status(2), packet_id (4), data(1002), checksum (16)]** 
     * 2    Bytes -> action_status ( \
     &emsp; &emsp; &emsp; 0xFF == OK \
-    &emsp; &emsp; &emsp; 0xFA = File not found \
-    &emsp; &emsp; &emsp; 0xAA = Bad request \
-    &emsp; &emsp; &emsp; 0x80 == Internal error \
+    &emsp; &emsp; &emsp; 0xFA == File not found \
+    &emsp; &emsp; &emsp; 0xAA == Bad request \
+    &emsp; &emsp; &emsp; 0x88 == EOF (End Of File) \
     &emsp; &emsp; )
     * 4    Bytes -> packet_id (number of the packet transmited)
     * 1002 Bytes -> data (max data buffer size)

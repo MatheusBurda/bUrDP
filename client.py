@@ -7,7 +7,7 @@ import random
 
 from utils import SERVER_PORT, SERVER_IP, DATA_SIZE, ACTION_STATUS, is_md5_checksum_valid, get_status
 
-CAN_DROP_PACKET_RANDOMLY = True
+CAN_DROP_PACKET_RANDOMLY = False
 PACKET_DROP_PROBABILITY = 1 # %
 
 def run_client(server_ip, server_port):
@@ -61,14 +61,15 @@ def run_client(server_ip, server_port):
                 elif status == ACTION_STATUS["BAD_REQUEST_ERROR"]:
                     raise FileNotFoundError("BAD_REQUEST_ERROR: ", data.decode('utf-8'))
                 elif status == ACTION_STATUS["OK"]:
+                    
                     if CAN_DROP_PACKET_RANDOMLY and random.randint(0, 100) <= PACKET_DROP_PROBABILITY:
                         print(f' packet {packet_id} dropped')
-                    elif packets_read == packet_id:
-                        if is_md5_checksum_valid(data, check_sum):
-                            file.write(data)
-                            bytes_read += len(data)
-                            client_socket.sendto(bytes(f'ACK {packets_read}', encoding='utf-8'), (server_ip, server_port))
-                            packets_read += 1
+                    
+                    elif packets_read == packet_id and is_md5_checksum_valid(data, check_sum):
+                        file.write(data)
+                        bytes_read += len(data)
+                        client_socket.sendto(bytes(f'ACK {packets_read}', encoding='utf-8'), (server_ip, server_port))
+                        packets_read += 1
 
                     else:
                         client_socket.sendto(bytes(f'RSD {packets_read}', encoding='utf-8'), (server_ip, server_port))
@@ -99,6 +100,9 @@ if __name__ == "__main__":
     port = SERVER_PORT
     if len(sys.argv) > 2:
         port = sys.argv[2]
+
+    if len(sys.argv) > 3:
+        CAN_DROP_PACKET_RANDOMLY = (int(sys.argv[3]) == 1)
 
     run_client(ip, int(port))
 
