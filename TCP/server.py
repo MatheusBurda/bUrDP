@@ -1,149 +1,154 @@
 import socket
 import struct
 import sys
+import threading
+import os
 
-from utils import calculate_md5, ACTION_STATUS, file_exists, SERVER_IP, SERVER_PORT
-from FileTransmissionHandler import FileTransmissionHandler
-
-class Server:
-
-    def __init__(self, ip, port):
-
-        print(f'binding server in {ip}:{port}')
-        self.file_client_dict = {}
-        self.ip = ip
-        self.port = port
-        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.server_socket.bind((ip, port))
-        print("server is running")
+import utils
+from utils import ActionStatus
 
 
-    def parse_query(self, query:str):
-        splitted_query = query.split(' ')
+class ServerInstance:
 
-        if len(splitted_query) != 2:
-            raise ValueError(f'BadRequestError: multiple arguments (expected 2, got {len(splitted_query)})')
-        
-        instruction, value = splitted_query
-        instruction = instruction.upper()
+    # Mutex to prevent use of terminal
+    mutex_terminal = threading.Lock()
 
-        return instruction, value
+    def __init__(self, client_socket, thread_n):
+        self.client_socket = client_socket 
+        self.thread_n = thread_n
 
+    def request(self, query):
+        status, _, data, _ = utils.parse_query(query)
 
-    def request(self, query, client_address):
-        instruction, value = self.parse_query(query)
+        if status == ActionStatus.FILE_REQUEST:
+            filename = data.decode('utf-8').split(' ')
+            if len(filename) != 1:
+                raise ValueError(f'BadRequestError: multiple arguments (expected 1, got {len(filename)})')
+            self.handle_get_file(filename=filename[0])
+            
+        elif status == ActionStatus.END_CONNECTION:
+            self.running = False
 
-        method = None
-        if instruction == 'GET':
-            method = self.handle_get_file
-        elif instruction == 'ACK':
-            method = self.handle_ack
-        elif instruction == 'RSD':
-            method = self.handle_resend
-        else:
-            raise ValueError(f'unknown request method "{instruction}"')
-        
-        return method(value, client_address)
+        elif status == ActionStatus.CHAT:
+            self.handle_chat(data.decode('utf-8'))
 
 
-    def handle_get_file(self, filename, client_address):
+    def handle_get_file(self, filename):
 
-        if not file_exists(filename):
+        data_path = os.path.join(os.path.dirname(__file__), 'data')
+        full_file_path = os.path.join(data_path, filename)
+
+        if not os.path.exists(full_file_path):
             raise FileNotFoundError(f'File {filename} does not exist')
         
-        if client_address in self.file_client_dict.keys():
-            # Explicitly delete object, so it closes the file that was open
-            del self.file_client_dict[client_address]
+        with self.mutex_terminal:
+            print(f'({self.thread_n}) [file request]: {filename}')
 
-        self.file_client_dict[client_address] = FileTransmissionHandler(filename, client_address)
+        with open(full_file_path, 'rb') as file:
+            packet = 0
+            while (data := file.read(utils.DATA_SIZE)) is not None:
 
-        return self.file_client_dict[client_address].get_data_from_packet()
-        
+                if not data:
+                    res = utils.data_pack(ActionStatus.EOF)
+                    self.client_socket.sendall(res)
+                    with self.mutex_terminal:
+                        print(f'({self.thread_n}) [file uploaded]: {filename} containing {packet} packets!')
+                    return
+                
+                self.client_socket.sendall(utils.data_pack(status=ActionStatus.FILE_PACKET, data=data, packet_id=packet))
+                packet += 1
 
-    def handle_ack(self, value, client_address):
-        if client_address not in self.file_client_dict.keys():
-            raise ValueError('File not open yet')
-        
-        value = int(value)
-        wrong_ack = self.file_client_dict[client_address].ack(value)
-        
-        if wrong_ack:
-            print(f'>>> wrong ack ({value}) retransmitting...')
-        else:
-            print(f'>>> ack {value}')
-
-        return self.file_client_dict[client_address].get_data_from_packet()
-
-
-    def handle_resend(self, value, client_address):
-        if client_address not in self.file_client_dict.keys():
-            raise ValueError('File not open yet')
-        
-        value = int(value)
-        print(f'>>> retransmitting ({value})')
-
-        return self.file_client_dict[client_address].get_data_from_packet(value)
-
-
-    def response(self, action_status, packet_id=0, data=''):
-        # [action_status(2), packet_id (4), data_size (2), data(1000), checksum (16)]
-        # 2    Bytes -> action_status
-        # 4    Bytes -> packet_id (number of the packet transmited)
-        # 1002 Bytes -> data (max data buffer size)
-        # 16   Bytes -> checksum (md5 checksum hash)
-
-        data_size = len(data)
-        checksum = calculate_md5(data)
-
-        res = struct.pack('>H', action_status)
-        res += struct.pack('>I', packet_id)
-        res += data
-        res += checksum
-
-        return res
     
+    def handle_chat(self, message):
+        with self.mutex_terminal:
+            print(f'({self.thread_n}) [chat]: {message}')    
+        self.client_socket.sendall(utils.data_pack(status=ActionStatus.OK))
+
 
     def run(self):
-        while True:
-            message, client_address = self.server_socket.recvfrom(1024)
-
+        self.running = True
+        
+        while self.running:
             try:
-                print(f'\n> request received from {client_address}:\n>> {self.parse_query(message.decode())}')
-                packet_id, data = self.request(message.decode(), client_address)
-                res = self.response(ACTION_STATUS["OK"], packet_id, data)
-                self.server_socket.sendto(res, client_address)
+                buffer = utils.read_buffer(self.client_socket)
+
+                if buffer is None:
+                    print('Buffer empty')
+                    self.running = False
+                    continue
+
+                self.request(buffer)
 
             # Handles File not found
             except FileNotFoundError as e:
                 data = bytes(str(e), encoding='utf-8')
-                res = self.response(ACTION_STATUS["FILE_NOT_FOUND_ERROR"], data=data)
-                self.server_socket.sendto(res, client_address)
+                res = utils.data_pack(ActionStatus.FILE_NOT_FOUND_ERROR, data=data)
+                self.client_socket.sendall(res)
 
             # Bad Request Error Handler
             except ValueError as e: 
                 data = bytes(str(e), encoding='utf-8')
-                print(f'BAD_REQUEST_ERROR: {data}')
-                res = self.response(ACTION_STATUS["BAD_REQUEST_ERROR"], data=data)
-                self.server_socket.sendto(res, client_address)
+                res = utils.data_pack(ActionStatus.BAD_REQUEST_ERROR, data=data)
+                self.client_socket.sendall(res)
 
-            # Handle End of file transmission
-            except EOFError as e:
-                data = bytes(str(e), encoding='utf-8')
-                res = self.response(ACTION_STATUS["EOF"], data=data)
-                self.server_socket.sendto(res, client_address)
-                # Delete from client file list
-                del self.file_client_dict[client_address]
+            except ConnectionResetError:
+                with self.mutex_terminal:
+                    print(f'({self.thread_n}) connection closed')
+                    self.running = False
+
+
+def create_server_instance(client_socket, thread_n):
+    global connections
+
+    print(f"({thread_n}) Connected from {client_socket.getpeername()}")
+    # Save the connection to broadcast later
+    connections.append(client_socket)
+    server = ServerInstance(client_socket, thread_n)
+    server.run()
+
+    connections.remove(client_socket)
+
+
+def server_broadcast_thread():
+    global connections
+    while True:
+        message = input('')
+        message_encoded = message.encode('utf-8')
+        request = utils.data_pack(status=ActionStatus.CHAT, data=message_encoded)
+
+        for conn in connections:
+            conn.sendall(request)
 
 
 if __name__ == "__main__":
 
-    ip = SERVER_IP
+    host = utils.SERVER_HOST
     if len(sys.argv) > 1:
-        ip = sys.argv[1]
+        host = sys.argv[1]
 
-    port = SERVER_PORT
+    port = utils.SERVER_PORT
     if len(sys.argv) > 2:
-        port = sys.argv[2]
+        port = int(sys.argv[2])
 
-    server = Server(ip, int(port))
-    server.run()
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind((host, port))
+    server.listen()
+    print(f"Server listening on {host}:{port}")
+
+    connections = []
+
+    n_threads = 0
+
+    # Creates the broadcast input thread
+    server_input = threading.Thread(target=server_broadcast_thread)
+    server_input.daemon = True  
+    server_input.start()
+
+    while True:
+        conn, addr = server.accept()
+        # creates a thread for the connection
+        client_handler = threading.Thread(target=create_server_instance, args=(conn, n_threads, ))
+        # kills the thread when main process is shut down
+        client_handler.daemon = True  
+        client_handler.start()
+        n_threads += 1

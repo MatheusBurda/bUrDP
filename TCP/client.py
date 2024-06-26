@@ -1,108 +1,188 @@
+import select
 import socket
 import struct
 import os
+import threading
 import time
 import sys
-import random
 
-from utils import SERVER_PORT, SERVER_IP, DATA_SIZE, ACTION_STATUS, is_md5_checksum_valid, get_status
+from utils import ActionStatus
+import utils
 
-CAN_DROP_PACKET_RANDOMLY = False
-PACKET_DROP_PROBABILITY = 1 # %
+class Client:
 
-def run_client(server_ip, server_port):
+    def __init__(self, server_ip, server_port, client_n):
 
-    while True:
-        client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        client_socket.settimeout(1)
+        self.running = True
 
-        message = input('> ')
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.socket.settimeout(1)
+        self.socket.connect((server_ip, server_port))
 
-        if message == '':
-            break
+        print(f'Connected to host on {server_ip}:{server_port}')
+        
+        self.current_file = None
+        self.filename = None
+        self.reset_file()     
 
-        file = None
+        self.has_printed_input_char = False
+        self.input_message_queue = []
 
-        try:
-            start_time = time.time()
-            client_socket.sendto(message.encode(), (server_ip, server_port))
+        self.files_path = os.path.join(os.path.dirname(__file__), 'output', str(client_n))
 
-            status = ACTION_STATUS["OK"]
-            packets_read = 0
-            bytes_read = 0
-            packets_lost = 0
-            filename = None
+        input_thread = threading.Thread(target=self.input, args=())
+        input_thread.daemon = True  
+        input_thread.start()
 
-            if 'GET' in message.upper():
-                message_splitted = message.split(' ')
-                if len(message_splitted) != 2:
-                    raise Exception('filename not correct')
-                filename = message_splitted[1]
 
-            if filename: 
-                file = open(os.path.join(os.getcwd(), 'output', filename), 'wb+')
+    def check_input(self, input_message):
 
-            while status != ACTION_STATUS["EOF"]:
+        request = None
+        splitted_input = input_message.split(' ')
+
+        # parses the input to check what procedure to do
+        if input_message.upper() == 'EXIT':
+            request = utils.data_pack(ActionStatus.END_CONNECTION)
+            self.running = False
+
+        elif splitted_input[0].upper() == 'FILE':
+            # await finish of last file recieve
+            while self.current_file is not None:
+                pass
+
+            self.filename = splitted_input[1]
+
+            full_file_path = os.path.join(self.files_path, self.filename)
+
+            if os.path.exists(full_file_path):
+                os.remove(full_file_path)
+
+            self.current_file = open(full_file_path, 'wb+')
+
+            request = utils.data_pack(ActionStatus.FILE_REQUEST, data=self.filename.encode('utf-8'))
+            self.transfer_start_time = time.time()
+            
+        else:
+            request = utils.data_pack(ActionStatus.CHAT, data=input_message.encode('utf-8'))
+        
+        return request
+    
+
+    def run(self):
+        while self.running:
+
+            try:
+                if len(self.input_message_queue) > 0: 
+                    request_message = self.check_input(self.input_message_queue.pop())
+                    self.socket.sendall(request_message)
+
                 try:
-                    buffer, _ = client_socket.recvfrom(1024)
-                except TimeoutError as err:
-                    client_socket.sendto(bytes(f'RSD {packets_read}', encoding='utf-8'), (server_ip, server_port))
-                    packets_lost += 1
+                    buffer = utils.read_buffer(self.socket)
+                except TimeoutError:
                     continue
 
-                # [action_status(2), packet_id (4), data_size (2), data(1000), checksum (16)] 
-                status = struct.unpack('>H', buffer[:2])[0]
-                packet_id = int(struct.unpack('>I', buffer[2:6])[0])
-                data = buffer[6:-16]
-                check_sum = buffer[-16:]
+                if buffer is None:
+                    break
 
-                if status == ACTION_STATUS["FILE_NOT_FOUND_ERROR"]:
-                    raise FileNotFoundError("FILE_NOT_FOUND_ERROR: ", data.decode('utf-8'))
-                elif status == ACTION_STATUS["BAD_REQUEST_ERROR"]:
-                    raise FileNotFoundError("BAD_REQUEST_ERROR: ", data.decode('utf-8'))
-                elif status == ACTION_STATUS["OK"]:
-                    
-                    if CAN_DROP_PACKET_RANDOMLY and random.randint(0, 100) <= PACKET_DROP_PROBABILITY:
-                        print(f' packet {packet_id} dropped')
-                    
-                    elif packets_read == packet_id and is_md5_checksum_valid(data, check_sum):
-                        file.write(data)
-                        bytes_read += len(data)
-                        client_socket.sendto(bytes(f'ACK {packets_read}', encoding='utf-8'), (server_ip, server_port))
-                        packets_read += 1
+                status, packet_id, data, check_sum = utils.parse_query(buffer)
 
+                if status == ActionStatus.CHAT:
+                    print(f'[server]: {data.decode('utf-8')}')
+
+                elif status == ActionStatus.FILE_PACKET:    
+                    if self.packets_read == packet_id and utils.is_md5_checksum_valid(data, check_sum):
+                        self.current_file.write(data)
+                        self.bytes_read += len(data)
+                        self.packets_read += 1
                     else:
-                        client_socket.sendto(bytes(f'RSD {packets_read}', encoding='utf-8'), (server_ip, server_port))
-                        packets_lost += 1
-                    
-            elapsed_time = time.time() - start_time
-            file.close()
-            print(f"""
-            Transfer finished in {elapsed_time:0.2f} seconds
-            {bytes_read} bytes read and {packets_lost}/{packets_read} packets lost ({(packets_lost/packets_read*100):0.2f} %)
-            """)
-            client_socket.close()
-        
-        except (TimeoutError, Exception, FileNotFoundError, KeyboardInterrupt) as err:
-            print(str(err))
-            if file:
-                file.close()
-                os.remove(os.path.join(os.getcwd(), 'output', filename))
+                        print(f'packet {packet_id} is corrupted')
+                        print(buffer)
+                        # print(f'{packet_id} of len {len(data)}:\n{data} \n\nchecksum {check_sum} != {utils.calculate_md5(data)}\n\n\n')  
+                        self.packets_lost += 1
+                        
+                elif status == ActionStatus.EOF:
+                    elapsed_time = time.time() - self.transfer_start_time
 
+                    if self.packets_lost > 0:
+                        print(f'Saving file that may be corrupted!!!!!!!!!')
+
+                    self.current_file.close()
+
+                    print(f"{self.filename} Transfer finished in {elapsed_time:0.2f} seconds\n{self.bytes_read} bytes read and {self.packets_lost}/{self.packets_read} packets lost ({(self.packets_lost / self.packets_read * 100):0.2f} %)")
+
+                    self.reset_file()
+
+                elif status == ActionStatus.FILE_NOT_FOUND_ERROR:
+                    raise FileNotFoundError("FILE_NOT_FOUND_ERROR: ", data.decode('utf-8'))
+                
+                elif status == ActionStatus.BAD_REQUEST_ERROR:
+                    raise FileNotFoundError("BAD_REQUEST_ERROR: ", data.decode('utf-8'))
+                
+                elif status == ActionStatus.OK:
+                    continue
+                
+                else:
+                    break
+
+            except (FileNotFoundError) as err:
+                print(str(err))
+                if self.current_file:
+                    self.current_file.close()
+                    os.remove(os.path.join(self.files_path, self.filename))
+                    self.reset_file()
+                
+            except KeyboardInterrupt:
+                self.socket.close()
+
+        self.socket.close()
+        print('Connection to host closed!')
+        self.running = False
+
+
+    def reset_file(self):
+        self.current_file = None
+        self.filename = None
+        self.packets_read = 0
+        self.bytes_read = 0
+        self.packets_lost = 0
+        self.transfer_start_time = 0
+
+
+    def input(self):
+        while self.running:
+            inp = input('')       
+
+            self.input_message_queue.append(inp)
+
+    # def input(self, prompt):
+        
+    #     if not self.has_printed_input_char:
+    #         print(prompt, end='', flush=True)
+    #         self.has_printed_input_char = True
+    #     i, o, e = select.select([sys.stdin], [], [], 1)
+
+    #     if (i):
+    #         inp = sys.stdin.readline().strip()
+    #         if inp == 'ETX':
+    #             raise KeyboardInterrupt
+    #         self.has_printed_input_char = False
+    #         return inp
+        
+    #     return None
 
 
 if __name__ == "__main__":
 
-    ip = SERVER_IP
+    ip = utils.SERVER_HOST
     if len(sys.argv) > 1:
         ip = sys.argv[1]
 
-    port = SERVER_PORT
+    port = utils.SERVER_PORT
     if len(sys.argv) > 2:
         port = sys.argv[2]
 
-    if len(sys.argv) > 3:
-        CAN_DROP_PACKET_RANDOMLY = (int(sys.argv[3]) == 1)
+    client_n = len(os.listdir(os.path.join(os.path.dirname(__file__), 'output')))
 
-    run_client(ip, int(port))
+    client = Client(ip, int(port), client_n)
+    client.run()
 
