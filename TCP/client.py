@@ -30,6 +30,8 @@ class Client:
 
         self.files_path = os.path.join(os.path.dirname(__file__), 'output', str(client_n))
 
+        os.mkdir(self.files_path)
+
         input_thread = threading.Thread(target=self.input, args=())
         input_thread.daemon = True  
         input_thread.start()
@@ -95,8 +97,6 @@ class Client:
                         self.bytes_read += len(data)
                         self.packets_read += 1
                     else:
-                        print(f'packet {packet_id} is corrupted')
-                        print(buffer)
                         # print(f'{packet_id} of len {len(data)}:\n{data} \n\nchecksum {check_sum} != {utils.calculate_md5(data)}\n\n\n')  
                         self.packets_lost += 1
                         
